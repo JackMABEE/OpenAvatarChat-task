@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 from chat_engine.contexts.session_clock import SessionClock
 from chat_engine.contexts.session_history import SessionHistory, HistoryConfig
@@ -9,6 +9,11 @@ from chat_engine.data_models.session_info_data import SessionInfoData
 @dataclass
 class SharedStates:
     active: bool = False
+    # Optional per-session participant basic info (PERSONALIZATION_DESIGN.md, Option A).
+    # Delivered at runtime by the client (e.g. RTC data-channel "SetParticipantInfo")
+    # and read by the LLM handler to personalize the system prompt for this session.
+    # None/empty -> no personalization (behavior unchanged).
+    participant_info: Optional[Dict[str, str]] = field(default=None)
 
 
 class SessionContext(object):

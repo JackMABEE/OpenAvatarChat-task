@@ -43,6 +43,13 @@ class LLMContext(HandlerContext):
         self.local_session_id = 0
         self.model_name = None
         self.system_prompt = None
+        # Personalization (PERSONALIZATION_DESIGN.md): base prompt + sources of
+        # participant info (config = Option B, shared_states = Option A runtime), and
+        # the participant dict currently reflected in system_prompt (change detection).
+        self.base_system_prompt = None
+        self.config_participant_info = None
+        self.shared_states = None
+        self.applied_participant_info = None
         self.api_key = None
         self.api_url = None
         self.client = None
@@ -101,13 +108,19 @@ class HandlerLLM(HandlerBase, ABC):
             handler_config = LLMConfig()
         context = LLMContext(session_context.session_info.session_id)
         context.model_name = handler_config.model_name
-        # Merge optional participant info into the base system prompt (once per session).
+        # Personalization: base prompt + participant info sources. Config info (Option B)
+        # is available now; runtime info (Option A) arrives later via shared_states and is
+        # picked up per-turn by _refresh_system_prompt.
+        context.base_system_prompt = handler_config.system_prompt
+        context.config_participant_info = handler_config.participant_info
+        context.shared_states = session_context.shared_states
         merged_system_prompt = build_personalized_system_prompt(
             handler_config.system_prompt, handler_config.participant_info
         )
         if merged_system_prompt != handler_config.system_prompt:
             logger.info(f"LLM personalized system prompt for session:\n{merged_system_prompt}")
         context.system_prompt = {'role': 'system', 'content': merged_system_prompt}
+        context.applied_participant_info = handler_config.participant_info
         context.api_key = handler_config.api_key
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
@@ -119,14 +132,45 @@ class HandlerLLM(HandlerBase, ABC):
             timeout=5.0,  # 30秒超时，避免 API 无响应时阻塞整个系统
         )
         return context
-    
+
     def start_context(self, session_context, handler_context):
         pass
+
+    @staticmethod
+    def _effective_participant_info(context: 'LLMContext') -> Optional[Dict]:
+        """Combine config (Option B) and runtime (Option A) participant info.
+
+        Runtime fields delivered via shared_states override config fields. Returns None
+        when neither source has anything (so behavior is unchanged).
+        """
+        runtime = getattr(context.shared_states, "participant_info", None) if context.shared_states else None
+        config = context.config_participant_info
+        if not runtime:
+            return config
+        if not config:
+            return runtime
+        return {**config, **runtime}
+
+    def _refresh_system_prompt(self, context: 'LLMContext'):
+        """Re-merge the system prompt when participant info has changed (per session).
+
+        Runtime participant info (Option A) arrives after create_context, so we re-check
+        each turn and rebuild only when it actually changed.
+        """
+        effective = self._effective_participant_info(context)
+        if effective == context.applied_participant_info:
+            return
+        merged = build_personalized_system_prompt(context.base_system_prompt, effective)
+        context.system_prompt = {'role': 'system', 'content': merged}
+        context.applied_participant_info = effective
+        logger.info(f"LLM system prompt updated with participant info:\n{merged}")
 
     def handle(self, context: HandlerContext, inputs: ChatData,
                output_definitions: Dict[ChatDataType, HandlerDataInfo]):
         output_definition = output_definitions.get(ChatDataType.AVATAR_TEXT).definition
         context = cast(LLMContext, context)
+        # Pick up any participant info delivered at runtime (Option A) for this session.
+        self._refresh_system_prompt(context)
 
         streamer = context.data_submitter.get_streamer(ChatDataType.AVATAR_TEXT)
         if inputs.type == ChatDataType.CAMERA_VIDEO and context.enable_video_input:

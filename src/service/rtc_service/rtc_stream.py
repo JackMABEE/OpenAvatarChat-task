@@ -279,6 +279,15 @@ class RtcStream(AsyncAudioVideoStreamHandler):
                             source_name="rtc",
                         )
                     )
+                elif message['header']['name'] == 'SetParticipantInfo':
+                    # Per-session participant basic info (PERSONALIZATION_DESIGN.md Option A).
+                    # Store on shared_states; the LLM handler merges it into its system
+                    # prompt for this session. Empty/absent -> no personalization.
+                    shared_states = getattr(self.client_session_delegate, "shared_states", None)
+                    if shared_states is not None:
+                        payload = message.get('payload') or {}
+                        shared_states.participant_info = payload if payload else None
+                        logger.info(f"Set participant_info for session: {shared_states.participant_info}")
                 elif message['header']['name'] == 'SendHumanText':
                     # self.client_session_delegate.emit_signal(
                     #     ChatSignal(
