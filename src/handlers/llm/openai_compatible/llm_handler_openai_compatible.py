@@ -18,6 +18,7 @@ from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
+from handlers.llm.openai_compatible.participant_info import build_personalized_system_prompt
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
 
@@ -28,6 +29,11 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     api_url: str = Field(default=None)
     enable_video_input: bool = Field(default=False)
     history_length: int = Field(default=20)
+    # Optional participant basic info (PERSONALIZATION_DESIGN.md, Option B: config-driven).
+    # When present, its non-empty fields are merged into system_prompt per session.
+    # Absent/empty -> behavior identical to today. Accepted keys: name, age, language,
+    # background, context.
+    participant_info: Optional[Dict] = Field(default=None)
 
 
 class LLMContext(HandlerContext):
@@ -95,7 +101,13 @@ class HandlerLLM(HandlerBase, ABC):
             handler_config = LLMConfig()
         context = LLMContext(session_context.session_info.session_id)
         context.model_name = handler_config.model_name
-        context.system_prompt = {'role': 'system', 'content': handler_config.system_prompt}
+        # Merge optional participant info into the base system prompt (once per session).
+        merged_system_prompt = build_personalized_system_prompt(
+            handler_config.system_prompt, handler_config.participant_info
+        )
+        if merged_system_prompt != handler_config.system_prompt:
+            logger.info(f"LLM personalized system prompt for session:\n{merged_system_prompt}")
+        context.system_prompt = {'role': 'system', 'content': merged_system_prompt}
         context.api_key = handler_config.api_key
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
