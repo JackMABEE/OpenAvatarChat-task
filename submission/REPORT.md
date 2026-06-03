@@ -3,7 +3,28 @@
 **项目**：OpenAvatarChat（LiteAvatar 配置 `config/chat_with_openai_compatible_bailian_cosyvoice.yaml`）
 **任务**：核实并解决三个 VAD / 打断相关问题
 **基线**：upstream `c9d823c`（前端子模块 upstream `a6182af`，对应 v0.6.0）
-**状态**：核心功能实测全部通过，未 push 到远程（按要求等你自己决定）
+**状态**：核心功能实测全部通过，已推送至本人远程仓库
+
+---
+
+## 如何获取代码（给审阅者）
+
+本项目含前端子模块；后端改动在父仓库本体，前端「语音打断 + 个性化 UI」在子模块里。
+**只需初始化前端这一个子模块**即可看到全部改动，无需拉取其余 7 个第三方大子模块
+（CosyVoice / MuseTalk / lite-avatar 等，体积达数 GB）：
+
+```bash
+git clone https://github.com/JackMABEE/OpenAvatarChat-task.git
+cd OpenAvatarChat-task
+git submodule update --init src/service/frontend_service/frontend
+```
+
+- 前端子模块远程：`https://github.com/JackMABEE/OpenAvatarChat-WebUI.git`
+  （`.gitmodules` 已指向此处，递归 clone 也能自动解析）。
+- 若需**完整运行**（含 avatar / TTS / VAD 等），再 `git submodule update --init` 拉取其余子模块，
+  并按 `README.md` 配置 `.env`（`DASHSCOPE_API_KEY`）与模型权重。
+- 本报告与设计文档均在 `submission/` 下：本文件、`BARGEIN_DESIGN.md`、
+  `PERSONALIZATION_DESIGN.md`、原始任务书 `TASK.md`、验证清单 `VERIFY.md`。
 
 ---
 
