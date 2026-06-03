@@ -266,8 +266,13 @@ class RtcClientSessionDelegate(ClientSessionDelegate):
             EngineChannelType.VIDEO: ChatDataType.CAMERA_VIDEO,
             EngineChannelType.TEXT: ChatDataType.HUMAN_TEXT,
         }
+        # Event loop that drains output_queues (the emit/get_data loop). Captured lazily
+        # in get_data so flush_output() can be scheduled onto it thread-safely.
+        self._emit_loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def get_data(self, modality: EngineChannelType, timeout: Optional[float] = 0.1) -> Optional[ChatData]:
+        if self._emit_loop is None:
+            self._emit_loop = asyncio.get_running_loop()
         data_queue = self.output_queues.get(modality)
         if data_queue is None:
             return None
@@ -324,6 +329,35 @@ class RtcClientSessionDelegate(ClientSessionDelegate):
         for data_queue in self.output_queues.values():
             while not data_queue.empty():
                 data_queue.get_nowait()
+
+    def flush_output(self, modalities=(EngineChannelType.AUDIO, EngineChannelType.VIDEO)):
+        """Drop already-queued outbound media so a barge-in stops in-flight playback.
+
+        On interrupt the avatar worker queues are cleared upstream, but frames already
+        handed to these output_queues keep being emitted. Draining must run on the loop
+        that owns the queues (the emit loop), so schedule it via call_soon_threadsafe
+        when called from another thread (on_signal).
+        """
+        def _drain():
+            for modality in modalities:
+                data_queue = self.output_queues.get(modality)
+                if data_queue is None:
+                    continue
+                dropped = 0
+                while not data_queue.empty():
+                    try:
+                        data_queue.get_nowait()
+                        dropped += 1
+                    except Exception:
+                        break
+                if dropped:
+                    logger.info(f"RtcClient: flushed {dropped} buffered {modality} frames on interrupt")
+
+        loop = self._emit_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(_drain)
+        else:
+            _drain()
 
 
 class ClientRtcConfigModel(HandlerBaseConfigModel, BaseModel):
@@ -593,6 +627,10 @@ class ClientHandlerRtc(ClientHandlerBase):
                 signal_payload.stream_key = signal.related_stream.stream_key_str
 
             if signal.type == ChatSignalType.STREAM_CANCEL:
+                # Barge-in: flush already-queued outbound avatar audio/video so the
+                # in-flight reply stops promptly instead of draining to the client.
+                if context.client_session_delegate is not None:
+                    context.client_session_delegate.flush_output()
                 current_stream = context.stream_manager.find_stream(signal.related_stream)
                 signal_payload.parent_stream_keys = [
                     stream.stream_key_str for stream in current_stream.ancestor_streams]
