@@ -137,7 +137,7 @@ def build_personalized_system_prompt(
 
 def _demo() -> None:
     """Print example merged prompts (normal + adversarial). For manual verification."""
-    base = "请你扮演一个 AI 助手，用简短的两三句对话来回答用户的问题。"
+    base = "You are an AI assistant. Answer the user's questions in a brief two or three sentences."
 
     print("=" * 70)
     print("EXAMPLE 1 — no participant info (regression: must equal base prompt)")

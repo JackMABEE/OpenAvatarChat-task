@@ -1,17 +1,19 @@
-# OpenAvatarChat 任务报告
+# OpenAvatarChat — Task Report
 
-**项目**：OpenAvatarChat（LiteAvatar 配置 `config/chat_with_openai_compatible_bailian_cosyvoice.yaml`）
-**任务**：核实并解决三个 VAD / 打断相关问题
-**基线**：upstream `c9d823c`（前端子模块 upstream `a6182af`，对应 v0.6.0）
-**状态**：核心功能实测全部通过，已推送至本人远程仓库
+**Project**: OpenAvatarChat (LiteAvatar config `config/chat_with_openai_compatible_bailian_cosyvoice.yaml`)
+**Task**: Verify and resolve three VAD / interruption issues
+**Baseline**: upstream `c9d823c` (frontend submodule upstream `a6182af`, i.e. v0.6.0)
+**Status**: All core functionality passed live testing; pushed to my own remote repositories
 
 ---
 
-## 如何获取代码（给审阅者）
+## How to get the code (for the reviewer)
 
-本项目含前端子模块；后端改动在父仓库本体，前端「语音打断 + 个性化 UI」在子模块里。
-**只需初始化前端这一个子模块**即可看到全部改动，无需拉取其余 7 个第三方大子模块
-（CosyVoice / MuseTalk / lite-avatar 等，体积达数 GB）：
+This project uses a frontend submodule: the backend changes live in the parent repo,
+while the frontend "voice barge-in + personalization UI" lives in the submodule.
+**You only need to initialize that one frontend submodule** to see all the changes —
+there is no need to pull the other 7 heavy third-party submodules (CosyVoice / MuseTalk
+/ lite-avatar, etc., several GB):
 
 ```bash
 git clone https://github.com/JackMABEE/OpenAvatarChat-task.git
@@ -19,151 +21,209 @@ cd OpenAvatarChat-task
 git submodule update --init src/service/frontend_service/frontend
 ```
 
-- 前端子模块远程：`https://github.com/JackMABEE/OpenAvatarChat-WebUI.git`
-  （`.gitmodules` 已指向此处，递归 clone 也能自动解析）。
-- 若需**完整运行**（含 avatar / TTS / VAD 等），再 `git submodule update --init` 拉取其余子模块，
-  并按 `README.md` 配置 `.env`（`DASHSCOPE_API_KEY`）与模型权重。
-- 本报告与设计文档均在 `submission/` 下：本文件、`BARGEIN_DESIGN.md`、
-  `PERSONALIZATION_DESIGN.md`、原始任务书 `TASK.md`、验证清单 `VERIFY.md`。
+- Frontend submodule remote: `https://github.com/JackMABEE/OpenAvatarChat-WebUI.git`
+  (`.gitmodules` already points here, so a recursive clone also resolves it automatically).
+- To **run the full stack** (with avatar / TTS / VAD, etc.), run `git submodule update --init`
+  to fetch the remaining submodules, then configure `.env` (`DASHSCOPE_API_KEY`) and the
+  model weights as described in `README.md`.
+- This report and the design docs all live under `submission/`: this file,
+  `BARGEIN_DESIGN.md`, `PERSONALIZATION_DESIGN.md`, the original task brief `TASK.md`,
+  and the verification checklist `VERIFY.md`.
 
 ---
 
-## 一、三个原始问题的现状核实结论
+## 1. Verification of the three original issues
 
-核实结论基于阅读 upstream 代码与配置（read-verified），并在实测中确认行为。
+These conclusions are based on reading the upstream code and config (read-verified) and
+confirming the behavior during live testing.
 
-### 问题 1：语音截断（说话开头/结尾被切掉）—— upstream 已有修复机制
+### Issue 1: Speech clipping (start/end of utterance cut off) — already mitigated upstream
 
-当前 upstream 已通过两层机制缓解：
+Current upstream mitigates this with two mechanisms:
 
-- **配置层（早于本任务时间）**：ASR/VAD 配置里的 `end_delay` 与 `buffer_look_back`（=5000ms）保留句尾静音缓冲并回看句首音频，避免端点检测把头尾切掉。这一机制自 **v0.3.0** 起即存在 —— 诚实说明：**这部分修复早于本任务发布的时间**，不是为本任务新增的。
-- **v0.6.0 新增**：`POST_END` 阶段的重连逻辑，进一步降低端点抖动导致的丢字。
+- **Config layer (predates this task)**: the ASR/VAD config's `end_delay` and
+  `buffer_look_back` (= 5000 ms) keep a trailing-silence buffer and look back at the
+  start of the utterance, preventing endpoint detection from clipping the head/tail.
+  This mechanism has existed **since v0.3.0** — to be honest: **this part of the fix
+  predates the release of this task**; it was not added for it.
+- **Added in v0.6.0**: reconnection logic in the `POST_END` phase, further reducing
+  dropped words caused by endpoint jitter.
 
-**结论**：问题 1 在当前 upstream 上已被机制化处理，无需我再改。
+**Conclusion**: Issue 1 is already handled systematically in current upstream; no change
+needed from me.
 
-### 问题 2：噪音误触发 —— upstream 已有机制，但实现方式需如实说明
+### Issue 2: Noise false-triggering — already mitigated upstream, but the approach must be stated honestly
 
-upstream（v0.6.0，commit `475e71f`）的应对是 **`volume_threshold`（音量/能量门限）+ AGC（自动增益）+ energy gate（能量门控）** 的组合。
+Upstream (v0.6.0, commit `475e71f`) addresses this with a combination of
+**`volume_threshold` (volume/energy threshold) + AGC (automatic gain control) + an energy gate**.
 
-**需要如实指出**：这套方案走的是「**能量门限 + 自动增益**」路线，**而不是**单纯「提高 VAD 阈值」或「加降噪模型」。也就是说它通过能量门控滤掉低能量噪声、用 AGC 归一化输入电平，而非靠更激进的阈值或独立降噪算法。这是一个工程取舍，效果在安静/一般噪音环境下可用，但不等于专门的降噪。
+**To be stated honestly**: this approach takes the **"energy gate + automatic gain"**
+route, **not** simply "raising the VAD threshold" or "adding a denoising model". That is,
+it filters out low-energy noise via energy gating and normalizes input level with AGC,
+rather than relying on a more aggressive threshold or a separate noise-reduction
+algorithm. This is an engineering trade-off: usable in quiet/normal-noise environments,
+but not equivalent to dedicated denoising.
 
-**结论**：问题 2 在当前 upstream 上已有缓解机制，无需我再改；但其本质是能量门控而非降噪，汇报时不应含糊。
+**Conclusion**: Issue 2 already has a mitigation mechanism in current upstream; no change
+needed from me — but its essence is energy gating rather than denoising, and that should
+not be glossed over when reporting.
 
-### 问题 3：语音打断（说话打断机器人）—— 真实缺口
+### Issue 3: Voice barge-in (speak to interrupt the bot) — the real gap
 
-这是三个问题里**唯一真正的缺口**：
+This is the **only genuine gap** among the three issues:
 
-- upstream **只有一个手动「打断」按钮**，且该按钮在语音模式下并不显示；
-- 服务端 VAD 是**单工（simplex）**的——机器人播放期间，服务端麦克风输入被静音，因此**无法靠服务端检测到用户插话**。
+- Upstream **only has a manual "interrupt" button**, and that button is not even shown in
+  voice mode;
+- The server-side VAD is **simplex** — during bot playback the server-side mic input is
+  muted, so **the server cannot detect the user speaking over the bot**.
 
-也就是说，upstream 根本没有「用户开口说话即打断机器人」的能力。这正是本任务需要补的功能。
-
----
-
-## 二、我实际做的工作
-
-### 1. 真正的语音打断（barge-in）
-
-在**前端**实现「用户开口即打断」，复用后端已有的取消链，不新增后端信号：
-
-- **前端麦克风 VAD**（`bargeInDetector.ts`）：基于能量的检测（RMS → dBFS），带
-  - 最小持续时长（min-duration，避免瞬时杂音触发）；
-  - 起停迟滞（start/stop hysteresis）；
-  - 仅在机器人正在说话时「武装」（armed-only-while-replying）；
-  - 触发后冷却期（cooldown，避免连续误触）。
-- **复用后端取消机制**：检测到插话即发送已有的 `Interrupt` data-channel 消息 → 后端 `INTERRUPT` 信号 → `interrupt_handler` 取消 `CLIENT_PLAYBACK`。无需改后端打断逻辑。
-- **防自我打断（关键）**：通过 `getUserMedia` 请求 `echoCancellation` / `noiseSuppression` / `autoGainControl`，使机器人自己的播放声不被麦克风采到而误判为「用户插话」。
-
-### 2. 个性化（根据参与者基本信息定制）
-
-把参与者信息注入 LLM 的 system prompt，分两条路线（共用同一套合并逻辑）：
-
-- **Option B（config 驱动，后端）**：`participant_info.py` 提供 `build_personalized_system_prompt()`，纯标准库实现。
-- **Option A（运行时 per-session）**：前端表单 → data-channel 消息 `SetParticipantInfo` → 后端存入会话 `shared_states` → LLM handler 每轮按需重新合并（运行时覆盖 config）。
-
-**防注入处理**（重要，体现在合并逻辑里）：
-- **追加而非覆盖**：参与者信息以清晰分隔的区块**追加**到 base prompt，不覆盖原有指令；
-- **空字段省略**：没填的字段不进 prompt；
-- **把值当数据而非指令**：中和区块标记符、折叠换行、限制长度，抵抗用户在字段里塞入 prompt-injection；
-- **回归安全**：无任何字段时原样返回 base prompt，不影响默认行为。
+In other words, upstream has no ability for "the user starts speaking → the bot stops".
+That is exactly the capability this task needed to add.
 
 ---
 
-## 三、实测中发现并修复的两个真实 Bug
+## 2. What I actually built
 
-这两个都是在联调/实测阶段暴露出来的真实问题，不是纸面分析。
+### 1. Real voice barge-in
 
-### Bug 1：个性化消息撞上后端 0.5s 开场丢弃窗口（时序问题）
+Implemented "the user starts speaking → interrupt" on the **frontend**, reusing the
+backend's existing cancel chain without adding any new backend signal:
 
-- **现象**：填了参与者信息，但机器人完全没体现出来。
-- **定位**：前端在 data-channel `open` 事件里**立刻**发送 `SetParticipantInfo`，而后端 `rtc_stream` 有一个约 **0.5s 的 stream start-delay 丢弃窗口**（`stream_start_delay`），会丢掉这段时间内收到的消息。于是个性化消息在到达 handler 之前就被丢了，从未生效。
-- **修复（双保险）**：
-  - **Fix A（前端，`6d9f0cb`）**：把发送推迟 1.5s，确保越过该丢弃窗口；
-  - **Fix B（后端，`0f9737d`）**：把控制类消息（`SetParticipantInfo`）从丢弃逻辑里**豁免**，作为后端兜底；其他消息保持原行为。
+- **Frontend mic VAD** (`bargeInDetector.ts`): energy-based detection (RMS → dBFS), with
+  - minimum duration (min-duration, to avoid transient-noise triggers);
+  - start/stop hysteresis;
+  - armed only while the bot is replying (armed-only-while-replying);
+  - a post-fire cooldown (to avoid repeated false triggers).
+- **Reuse the backend cancel mechanism**: on detected barge-in, send the existing
+  `Interrupt` data-channel message → backend `INTERRUPT` signal → `interrupt_handler`
+  cancels `CLIENT_PLAYBACK`. No change to backend interrupt logic.
+- **Self-interrupt prevention (key)**: request `echoCancellation` / `noiseSuppression` /
+  `autoGainControl` via `getUserMedia`, so the bot's own playback is not picked up by the
+  mic and mistaken for "the user speaking".
 
-### Bug 2：打断时在途音视频队列未清空，导致 1–2s 拖尾
+### 2. Personalization (tailored from a participant's basic info)
 
-- **现象**：语音打断后，机器人的回复音视频还会继续播约 1–2 秒才停，不够「干净」。
-- **定位**：打断时上游（avatar worker）的队列确实被清空了，**但已经交给 RTC delegate 的 `output_queues` 的那些帧仍在继续向客户端排放**，所以在途的这段回复继续播完。
-- **修复（`8c50170`）**：在 `STREAM_CANCEL`（取消 `CLIENT_PLAYBACK`）时，调用新增的 `flush_output()` 清空 delegate 的 **AUDIO + VIDEO** `output_queues`。因为 `on_signal` 可能跑在别的线程，而排放循环（emit loop）拥有这些队列，所以用 `call_soon_threadsafe` 把清空动作调度到 emit loop 上执行，线程安全。日志会打印 `RtcClient: flushed N buffered ... frames on interrupt`。
+Inject participant info into the LLM system prompt via two paths (sharing one merge function):
 
----
+- **Option B (config-driven, backend)**: `participant_info.py` provides
+  `build_personalized_system_prompt()`, a pure-stdlib implementation.
+- **Option A (runtime, per-session)**: frontend form → `SetParticipantInfo` data-channel
+  message → backend stores it on the session `shared_states` → the LLM handler re-merges
+  per turn as needed (runtime overrides config).
 
-## 四、实测结果
-
-单机环境（RTX 4090 Laptop）实测，核心功能全部通过：
-
-**语音打断（A1–A4）：**
-- A1 能打断：用户开口说话能打断正在说话的机器人 ✅
-- A2 立刻干净停、无拖尾：打断后音视频立即停止（Bug 2 修复后无 1–2s 残留）✅
-- A3 安静时不自我打断：机器人说话、用户不出声时不会自己打断自己 ✅
-- A4 噪音不误触发 / 手动按钮仍正常：一般噪音下不误触，原有手动打断按钮功能未受影响 ✅
-
-**个性化：** 机器人能正确认出并体现参与者信息 ✅
-
----
-
-## 五、已知小问题与局限
-
-- ~~**UI 小缺陷**：个性化表单展开时「开始对话」按钮被挤出可视区域~~ —— **已修复**（commit `f772415`）：开播前布局改为 flex 纵向、视频自适应收缩，表单/视频/按钮都在可视区内；通话中布局不受影响，已实测刷新确认按钮回归。
-- **测试范围有限**：单机环境、单次手动测试，未做多机/多浏览器/弱网/压力测试，也未做长时间稳定性观察。
-- **问题 2 的本质**：如上所述是能量门控 + AGC，而非专门降噪；强噪声环境下的鲁棒性未专门验证。
-- **前端构建产物未提交**：子模块 `dist/` 下有重新构建的产物处于未提交状态（与本次功能代码无关，属构建输出）。
-- **upstream 既有类型错误未修**：前端独立 `pnpm typecheck` 有 26 个**既存于 upstream**、分布在 17 个未改动文件中的错误，属任务范围之外，未修（避免破坏提交隔离）；我改动的文件本身类型检查干净，`pnpm build` 通过。
-- **未 push**：所有改动仅在本地分支，未推送远程。
+**Prompt-injection handling** (important, implemented in the merge logic):
+- **Append, never overwrite**: participant info is **appended** as a clearly-delimited
+  block to the base prompt; it does not overwrite the original instructions;
+- **Omit empty fields**: unfilled fields don't enter the prompt;
+- **Treat values as data, not instructions**: neutralize block markers, collapse
+  newlines, and cap length, to resist users injecting a prompt into the fields;
+- **Regression-safe**: with no fields, the base prompt is returned unchanged, leaving
+  default behavior intact.
 
 ---
 
-## 附录：本次所有改动清单（分支 + commit）
+## 3. Two real bugs found and fixed during live testing
 
-> 基线：父仓库 upstream `c9d823c`；前端子模块 upstream `a6182af`（v0.6.0）。以下均为在基线之上新增的提交，均未 push。
+Both are real issues surfaced during integration/live testing — not paper analysis.
 
-### 父仓库（OpenAvatarChat）— 分支 `feature/participant-personalization`
+### Bug 1: Personalization message hits the backend's 0.5 s start-delay drop window (timing)
 
-| commit | 说明 |
+- **Symptom**: participant info was filled in, but the bot didn't reflect it at all.
+- **Diagnosis**: the frontend sent `SetParticipantInfo` **immediately** in the
+  data-channel `open` event, but the backend `rtc_stream` has an ~**0.5 s stream
+  start-delay drop window** (`stream_start_delay`) that drops messages received during
+  it. So the personalization message was dropped before reaching the handler and never
+  took effect.
+- **Fix (belt-and-suspenders)**:
+  - **Fix A (frontend, `6d9f0cb`)**: delay the send by 1.5 s to clear that window;
+  - **Fix B (backend, `0f9737d`)**: exempt control messages (`SetParticipantInfo`) from
+    the drop logic as a backend backstop; other messages keep the original behavior.
+
+### Bug 2: Interrupt left in-flight audio/video queues unflushed, causing a 1–2 s tail
+
+- **Symptom**: after a voice barge-in, the bot's reply audio/video kept playing for
+  ~1–2 seconds before stopping — not "clean" enough.
+- **Diagnosis**: on interrupt the upstream (avatar worker) queues were indeed cleared,
+  **but frames already handed to the RTC delegate's `output_queues` kept draining to the
+  client**, so the in-flight portion of the reply finished playing.
+- **Fix (`8c50170`)**: on `STREAM_CANCEL` (cancel of `CLIENT_PLAYBACK`), call the new
+  `flush_output()` to drain the delegate's **AUDIO + VIDEO** `output_queues`. Because
+  `on_signal` may run on another thread while the emit loop owns these queues, the drain
+  is scheduled onto the emit loop via `call_soon_threadsafe` (thread-safe). The log prints
+  `RtcClient: flushed N buffered ... frames on interrupt`.
+
+---
+
+## 4. Test results
+
+Tested on a single machine (RTX 4090 Laptop); all core functionality passed:
+
+**Voice barge-in (A1–A4):**
+- A1 can interrupt: speaking can interrupt the bot mid-speech ✅
+- A2 stops cleanly, no tail: audio/video stops immediately after interrupt (no 1–2 s
+  residual after the Bug 2 fix) ✅
+- A3 no self-interrupt when quiet: while the bot speaks and the user is silent, it does
+  not interrupt itself ✅
+- A4 no false-trigger from noise / manual button still works: no false triggers under
+  normal noise, and the original manual interrupt button is unaffected ✅
+
+**Personalization:** the bot correctly recognizes and reflects the participant info ✅
+
+---
+
+## 5. Known minor issues and limitations
+
+- ~~**UI minor defect**: when the personalization form is expanded, the "start chat"
+  button is pushed out of the visible area~~ — **Fixed** (commit `f772415`): the
+  pre-session layout was changed to a flex column with the video shrinking to fit, so the
+  form/video/button all stay within view; the in-call layout is unaffected, and a refresh
+  confirmed the button returns.
+- **Limited test coverage**: single machine, single manual test run; no multi-machine /
+  multi-browser / weak-network / stress testing, and no long-running stability observation.
+- **Nature of Issue 2**: as noted above it is energy gating + AGC, not dedicated
+  denoising; robustness under strong noise was not specifically verified.
+- **Frontend build artifacts uncommitted**: the submodule's `dist/` contains rebuilt
+  artifacts left uncommitted (unrelated to the feature code; build output).
+- **Pre-existing upstream type errors not fixed**: the frontend's standalone
+  `pnpm typecheck` reports 26 errors that **already exist in upstream**, across 17
+  untouched files; they are out of scope and left unfixed (to avoid breaking commit
+  isolation). The files I changed themselves typecheck cleanly, and `pnpm build` passes.
+
+---
+
+## Appendix: Full change inventory (branches + commits)
+
+> Baseline: parent repo upstream `c9d823c`; frontend submodule upstream `a6182af` (v0.6.0).
+> All commits below are added on top of the baseline.
+
+### Parent repo (OpenAvatarChat) — branch `feature/participant-personalization`
+
+| commit | Description |
 |--------|------|
-| `8c50170` | fix(barge-in)：打断时清空 RTC delegate 的 AUDIO+VIDEO 在途发送队列，消除 1–2s 拖尾（Bug 2 修复） |
-| `0f9737d` | fix(personalization)：后端把控制消息（SetParticipantInfo）从 0.5s 开场丢弃窗口中豁免（Bug 1 的后端兜底，Fix B） |
-| `6d4ea50` | feat(llm)：运行时 per-session 个性化——data-channel 收 SetParticipantInfo 存入 shared_states，LLM 每轮按需重合并（Option A 后端） |
-| `6db7e1b` | feat(llm)：config 驱动的 system prompt 个性化合并逻辑 `participant_info.py`，含防注入处理（Option B） |
+| `8c50170` | fix(barge-in): flush the RTC delegate's in-flight AUDIO+VIDEO output queues on interrupt, removing the 1–2 s tail (Bug 2 fix) |
+| `0f9737d` | fix(personalization): backend exempts control messages (SetParticipantInfo) from the 0.5 s start-delay drop window (Bug 1 backend backstop, Fix B) |
+| `6d4ea50` | feat(llm): runtime per-session personalization — receive SetParticipantInfo over the data channel into shared_states, LLM re-merges per turn as needed (Option A backend) |
+| `6db7e1b` | feat(llm): config-driven system-prompt personalization merge logic `participant_info.py`, with prompt-injection handling (Option B) |
 
-涉及文件（共 7 个，+448/−7）：
-`src/handlers/client/rtc_client/client_handler_rtc.py`、`src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py`、`src/handlers/llm/openai_compatible/participant_info.py`、`src/chat_engine/contexts/session_context.py`、`src/service/rtc_service/rtc_stream.py`、`config/chat_with_openai_compatible_bailian_cosyvoice_personalized.yaml`、`scripts/verify_personalization.py`
+Files touched (7 total, +448/−7):
+`src/handlers/client/rtc_client/client_handler_rtc.py`, `src/handlers/llm/openai_compatible/llm_handler_openai_compatible.py`, `src/handlers/llm/openai_compatible/participant_info.py`, `src/chat_engine/contexts/session_context.py`, `src/service/rtc_service/rtc_stream.py`, `config/chat_with_openai_compatible_bailian_cosyvoice_personalized.yaml`, `scripts/verify_personalization.py`
 
-### 前端子模块（src/service/frontend_service/frontend）— 分支 `feature/participant-personalization-ui`
+### Frontend submodule (src/service/frontend_service/frontend) — branch `feature/participant-personalization-ui`
 
-> 该分支叠在 barge-in 分支之上（共享 app.ts / webrtc.ts）。另有独立分支 `feature/voice-barge-in`（含 `7755a97`）。
+> This branch is stacked on the barge-in branch (shares app.ts / webrtc.ts). There is also
+> a standalone branch `feature/voice-barge-in` (containing `7755a97`).
 
-| commit | 说明 |
+| commit | Description |
 |--------|------|
-| `f772415` | fix(ui)：开播前改 flex 纵向布局，个性化表单展开时「开始对话」按钮仍可见（已知局限项的修复） |
-| `6d9f0cb` | fix(personalization)：把 SetParticipantInfo 推迟 1.5s 发送以越过后端开场丢弃窗口（Bug 1 修复，Fix A） |
-| `db1cadc` | feat(personalization)：参与者信息表单 + per-session 传输（Option A 前端） |
-| `7755a97` | feat(barge-in)：前端麦克风 VAD 实现语音打断，复用后端取消链，含回声消除/最小时长/迟滞/冷却防误触 |
+| `f772415` | fix(ui): change the pre-session layout to a flex column so the "start chat" button stays visible when the personalization form is expanded (fix for the known-limitation item) |
+| `6d9f0cb` | fix(personalization): delay sending SetParticipantInfo by 1.5 s to clear the backend's start-delay drop window (Bug 1 fix, Fix A) |
+| `db1cadc` | feat(personalization): participant info form + per-session transport (Option A frontend) |
+| `7755a97` | feat(barge-in): frontend mic VAD for voice barge-in, reusing the backend cancel chain, with echo cancellation / min-duration / hysteresis / cooldown for false-trigger prevention |
 
-涉及文件（共 9 个，+481/−1，不含 dist 构建产物）：
-`src/renderer/src/helpers/bargeInDetector.ts`、`src/renderer/src/store/webrtc.ts`、`src/renderer/src/store/app.ts`、`src/renderer/src/store/media.ts`、`src/renderer/src/components/ParticipantInfoForm.vue`、`src/renderer/src/interface/participant.ts`、`src/renderer/src/interface/eventType.ts`、`src/renderer/src/views/VideoChat/index.vue`、`BARGE_IN.md`
+Files touched (9 total, +481/−1, excluding dist build artifacts):
+`src/renderer/src/helpers/bargeInDetector.ts`, `src/renderer/src/store/webrtc.ts`, `src/renderer/src/store/app.ts`, `src/renderer/src/store/media.ts`, `src/renderer/src/components/ParticipantInfoForm.vue`, `src/renderer/src/interface/participant.ts`, `src/renderer/src/interface/eventType.ts`, `src/renderer/src/views/VideoChat/index.vue`, `BARGE_IN.md`
 
-### 设计文档
+### Design docs
 
-`Task_2/BARGEIN_DESIGN.md`（打断方案）、`Task_2/PERSONALIZATION_DESIGN.md`（个性化方案）、`Task_2/VERIFY.md`（验证清单）。
+`submission/BARGEIN_DESIGN.md` (barge-in design), `submission/PERSONALIZATION_DESIGN.md`
+(personalization design), `submission/VERIFY.md` (verification checklist).
