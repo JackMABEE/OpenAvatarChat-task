@@ -40,6 +40,11 @@ def _get_h264_encoder_info():
 
 
 class RtcStream(AsyncAudioVideoStreamHandler):
+    # Control messages exempt from the stream start-delay drop (Fix B backstop):
+    # the client may legitimately send these right when the data channel opens,
+    # i.e. before stream_start_delay of media time has elapsed.
+    START_DELAY_EXEMPT_MESSAGES = {"SetParticipantInfo"}
+
     def __init__(self,
                  session_id: Optional[str],
                  expected_layout="mono",
@@ -266,9 +271,14 @@ class RtcStream(AsyncAudioVideoStreamHandler):
 
                 if self.client_session_delegate is None:
                     return
-                timestamp = self.client_session_delegate.get_timestamp()
-                if timestamp[0] / timestamp[1] < self.stream_start_delay:
-                    return
+                # Fix B (backstop): don't drop control messages (e.g. SetParticipantInfo)
+                # within the stream start-delay window — the client may send them right as
+                # the data channel opens. Other messages keep the original start-delay drop.
+                message_name = (message.get('header') or {}).get('name')
+                if message_name not in self.START_DELAY_EXEMPT_MESSAGES:
+                    timestamp = self.client_session_delegate.get_timestamp()
+                    if timestamp[0] / timestamp[1] < self.stream_start_delay:
+                        return
                 logger.info(f'on_chat_datachannel: {message}')
     
                 if message['header']['name'] == 'Interrupt':
