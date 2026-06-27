@@ -23,7 +23,13 @@ default:
         module: vad/silerovad/vad_handler_silero
         speaking_threshold: 0.5
         start_delay: 2048
-        end_delay: 5000
+        # Task 4 — turn-taking timing. Units are audio samples (Silero @ 16 kHz),
+        # so 6500 ≈ 406 ms of trailing silence before end-of-turn is committed.
+        # Previously 5000 (~312 ms). Bumped to give users a touch more pause
+        # tolerance between phrases; `early_end_delay` (1500 ≈ 94 ms) still
+        # primes downstream early so perceived first-token gap doesn't grow.
+        # Tune live on the UH host; not a setting you can validate offline.
+        end_delay: 6500
         buffer_look_back: 5000
         speech_padding: 512
       SenseVoice:
