@@ -1,5 +1,6 @@
 
 
+import asyncio
 import os
 import re
 from typing import Dict, Optional, Set, cast
@@ -18,6 +19,7 @@ from chat_engine.data_models.chat_stream import StreamKey
 from chat_engine.contexts.session_context import SessionContext
 from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBundleDefinition, DataBundleEntry
 from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
+from handlers.llm.openai_compatible.filler_controller import FillerController
 from handlers.llm.openai_compatible.participant_info import build_personalized_system_prompt
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
@@ -34,6 +36,12 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     # Absent/empty -> behavior identical to today. Accepted keys: name, age, language,
     # background, context.
     participant_info: Optional[Dict] = Field(default=None)
+    # Task 1 — LLM-latency thinking cue. When the gap between ASR-end and the first
+    # LLM token exceeds filler_delay_ms, push filler_text into the per-turn AVATAR_TEXT
+    # stream so the avatar speaks a brief cue instead of going silent. Set delay to 0
+    # or text to "" to disable.
+    filler_delay_ms: int = Field(default=600)
+    filler_text: str = Field(default="嗯…")
 
 
 class LLMContext(HandlerContext):
@@ -59,6 +67,8 @@ class LLMContext(HandlerContext):
         self.history = None
         self.enable_video_input = False
         self.active_stream_keys: Set[StreamKey] = set()
+        self.filler_delay_ms = 600
+        self.filler_text = ""
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -124,6 +134,8 @@ class HandlerLLM(HandlerBase, ABC):
         context.api_key = handler_config.api_key
         context.api_url = handler_config.api_url
         context.enable_video_input = handler_config.enable_video_input
+        context.filler_delay_ms = handler_config.filler_delay_ms
+        context.filler_text = handler_config.filler_text
         context.history = ChatHistory(history_length=handler_config.history_length)
         context.client =    OpenAI(  
             # 若没有配置环境变量，请用百炼API Key将下行替换为：api_key="sk-xxx",
@@ -207,6 +219,66 @@ class HandlerLLM(HandlerBase, ABC):
         logger.debug(f'llm input {context.model_name} {current_content} ')
         if stream_key:
             context.active_stream_keys.add(stream_key)
+
+        # Task 1 — LLM-latency thinking cue.
+        # Arm a per-turn FillerController that emits `filler_text` if the gap
+        # between ASR-end (now) and the first non-empty LLM chunk exceeds
+        # `filler_delay_ms`. The filler rides the same per-turn AVATAR_TEXT
+        # stream opened at line ~186 above (cancelable=True), so the existing
+        # barge-in chain (INTERRUPT -> STREAM_CANCEL -> BailianTTSSession.reset
+        # + client_handler_rtc.flush_output) tears it down for free. No
+        # parallel teardown.
+        #
+        # Thread model: the timer fires on its own thread. `streamer.stream_data`
+        # is already called from this pump thread, and the existing for-loop
+        # below treats it as safe to call without an asyncio hop because the
+        # downstream sinks are sync queues. To follow the same pattern as
+        # client_handler_rtc.flush_output (loop.call_soon_threadsafe onto a
+        # captured loop), we capture a running loop if one is reachable from
+        # the pump thread and hop the emit through it; if not (the common
+        # case, since handle() is invoked synchronously from a pump thread,
+        # see chat_engine/core/chat_session.py:133), we fall back to a direct
+        # call — equivalent to what the for-loop already does for real chunks.
+        # GPU-host verification covers both branches.
+        try:
+            filler_emit_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Expected: handle() runs on a sync pump thread, not on the loop.
+            filler_emit_loop = None
+
+        def _push_filler_to_stream(text: str) -> None:
+            # Late-cancel guard: if the per-turn stream was already cancelled
+            # (barge-in or first chunk arrived), skip the emit entirely.
+            if stream_key and stream_key not in context.active_stream_keys:
+                return
+            try:
+                filler_bundle = DataBundle(output_definition)
+                filler_bundle.set_main_data(text)
+                streamer.stream_data(filler_bundle)
+                logger.info(
+                    f"LLM: emitted thinking cue '{text}' after "
+                    f"{context.filler_delay_ms}ms gap"
+                )
+            except Exception as e:
+                logger.warning(f"LLM: filler emit failed: {e}")
+
+        def _emit_filler(text: str) -> None:
+            # Runs on the Timer thread. Mirror client_handler_rtc.flush_output's
+            # pattern: hop to the emit loop if we have one, otherwise call
+            # inline (safe — the for-loop below already calls stream_data
+            # from this same pump thread without hopping).
+            if filler_emit_loop is not None and filler_emit_loop.is_running():
+                filler_emit_loop.call_soon_threadsafe(_push_filler_to_stream, text)
+            else:
+                _push_filler_to_stream(text)
+
+        filler = FillerController(
+            delay_ms=context.filler_delay_ms,
+            text=context.filler_text,
+            emit_callback=_emit_filler,
+        )
+        filler.arm()
+
         try:
             completion = context.client.chat.completions.create(
                 model=context.model_name,  # 此处以qwen-plus为例，可按需更换模型名称。模型列表：https://help.aliyun.com/zh/model-studio/getting-started/models
@@ -222,6 +294,7 @@ class HandlerLLM(HandlerBase, ABC):
             cancelled = False
             for chunk in completion:
                 if stream_key and stream_key not in context.active_stream_keys:
+                        filler.disarm()  # exit #2: STREAM_CANCEL (barge-in)
                         cancelled = True
                         try:
                             completion.close()
@@ -229,6 +302,7 @@ class HandlerLLM(HandlerBase, ABC):
                             pass
                         break
                 if (chunk and chunk.choices and chunk.choices[0] and chunk.choices[0].delta.content):
+                    filler.disarm()  # exit #1: first non-empty chunk
                     output_text = chunk.choices[0].delta.content
                     context.output_texts += output_text
                     logger.info(output_text)
@@ -239,6 +313,7 @@ class HandlerLLM(HandlerBase, ABC):
                 context.history.add_message(HistoryMessage(role="human", content=chat_text))
                 context.history.add_message(HistoryMessage(role="avatar", content=context.output_texts))
         except Exception as e:
+            filler.disarm()  # exit #3: LLM call raised
             logger.error(e)
             if isinstance(e, APIStatusError):
                 response = e.body
@@ -252,6 +327,12 @@ class HandlerLLM(HandlerBase, ABC):
             output = DataBundle(output_definition)
             output.set_main_data(error_text)
             streamer.stream_data(output, finish_stream=True)
+        finally:
+            # Belt-and-suspenders: ensure the timer is cancelled on any path
+            # out of the try-block. disarm() is idempotent so the explicit
+            # calls above are still the source of truth for ordering vs the
+            # first real chunk.
+            filler.disarm()
         context.input_texts = ''
         context.output_texts = ''
         if cancelled:
