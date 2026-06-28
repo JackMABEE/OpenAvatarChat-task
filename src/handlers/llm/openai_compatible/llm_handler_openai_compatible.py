@@ -21,6 +21,7 @@ from chat_engine.data_models.runtime_data.data_bundle import DataBundle, DataBun
 from handlers.llm.openai_compatible.chat_history_manager import ChatHistory, HistoryMessage
 from handlers.llm.openai_compatible.filler_controller import FillerController
 from handlers.llm.openai_compatible.participant_info import build_personalized_system_prompt
+from handlers.llm.openai_compatible.tone_instruction import apply_tone_instruction
 from chat_engine.data_models.chat_stream_config import ChatStreamConfig
 
 
@@ -42,6 +43,20 @@ class LLMConfig(HandlerBaseConfigModel, BaseModel):
     # or text to "" to disable.
     filler_delay_ms: int = Field(default=600)
     filler_text: str = Field(default="嗯…")
+    # Task 2-ALT — emotional tone via LLM word choice (NOT a TTS change).
+    # When enable_tone is True, tone_instruction is appended AFTER the
+    # participant block in the system prompt to steer the LLM's wording.
+    # Default OFF so behavior is unchanged unless explicitly opted in.
+    enable_tone: bool = Field(default=False)
+    tone_instruction: str = Field(
+        default=(
+            "Respond with natural warmth and appropriate emotional "
+            "expressiveness. Vary your tone and word choice to match the "
+            "content (e.g. encouraging when the user is uncertain, "
+            "celebratory when they succeed). Keep replies as brief as the "
+            "base instruction requires."
+        )
+    )
 
 
 class LLMContext(HandlerContext):
@@ -69,6 +84,8 @@ class LLMContext(HandlerContext):
         self.active_stream_keys: Set[StreamKey] = set()
         self.filler_delay_ms = 600
         self.filler_text = ""
+        self.enable_tone = False
+        self.tone_instruction = ""
 
 
 class HandlerLLM(HandlerBase, ABC):
@@ -124,8 +141,16 @@ class HandlerLLM(HandlerBase, ABC):
         context.base_system_prompt = handler_config.system_prompt
         context.config_participant_info = handler_config.participant_info
         context.shared_states = session_context.shared_states
+        context.enable_tone = handler_config.enable_tone
+        context.tone_instruction = handler_config.tone_instruction
         merged_system_prompt = build_personalized_system_prompt(
             handler_config.system_prompt, handler_config.participant_info
+        )
+        # Task 2-ALT: layer the tone suffix AFTER the participant block so the
+        # block stays opaque (no re-opening of the prompt-injection surface
+        # closed by build_personalized_system_prompt).
+        merged_system_prompt = apply_tone_instruction(
+            merged_system_prompt, context.enable_tone, context.tone_instruction
         )
         if merged_system_prompt != handler_config.system_prompt:
             logger.info(f"LLM personalized system prompt for session:\n{merged_system_prompt}")
@@ -173,6 +198,10 @@ class HandlerLLM(HandlerBase, ABC):
         if effective == context.applied_participant_info:
             return
         merged = build_personalized_system_prompt(context.base_system_prompt, effective)
+        # Task 2-ALT: same layering rule as create_context — tone goes AFTER
+        # the participant block; build_personalized_system_prompt output is
+        # treated as opaque.
+        merged = apply_tone_instruction(merged, context.enable_tone, context.tone_instruction)
         context.system_prompt = {'role': 'system', 'content': merged}
         context.applied_participant_info = effective
         logger.info(f"LLM system prompt updated with participant info:\n{merged}")
